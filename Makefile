@@ -70,6 +70,12 @@ $(BUILD)/inject_log.o: $(SRC_DIR)/multiwriter_log.c $(HEADERS)
 $(BUILD)/inject_rowdiff.o: $(SRC_DIR)/multiwriter_rowdiff.c $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -Dmalloc=inject_malloc -Dcalloc=inject_calloc -Drealloc=inject_realloc -c $< -o $@
+$(BUILD)/inject_fsync.o: $(SRC_DIR)/multiwriter_log.c $(HEADERS)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -Dfsync=inject_fsync -c $< -o $@
+$(DIST)/mw_holesync$(EXE): $(BUILD)/t_mw_holesync.o $(filter-out $(BUILD)/multiwriter_log.o,$(LIB_OBJ)) $(BUILD)/inject_fsync.o
+	@mkdir -p $(DIST)
+	$(CC) $^ -o $@ $(LDFLAGS)
 $(DIST)/mw_stagednormal$(EXE): $(BUILD)/t_mw_stagednormal.o $(filter-out $(BUILD)/multiwriter_log.o,$(LIB_OBJ)) $(BUILD)/inject_log.o
 	@mkdir -p $(DIST)
 	$(CC) $^ -o $@ $(LDFLAGS)
