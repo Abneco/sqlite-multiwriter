@@ -348,11 +348,13 @@ int mw_seglog_open (mw_db *db, mw_seglog_replay_fn fn, void *ctx, uint64_t *base
             else if (i == 0) { first_epoch_set(sh, ids[i].id, base + 1); good_seg = ids[i].id; good_end = MW_SEG_HDR; }
             else { stop = true; }                                                          // a segment without a valid first record: nothing after the previous one belongs to the log
         }
+        free(pg); free(locs);
+        // An unreadable record leaves the prefix unknown. Preserve every
+        // segment so that a later open can retry recovery without data loss.
+        if (rc != SQLITE_OK) { free(ids); return rc; }
         cur_seg = good_seg; cur_end = good_end;
         for (int j = 0; j < nids; j++) if (ids[j].id > cur_seg) { char p2[620]; seg_path(sl, ids[j].id, p2, sizeof p2); unlink(p2); }     // segments after the end of the prefix
         for (int j = 0; j < nids; j++) if (ids[j].id > cur_seg) nids = j;
-        free(pg); free(locs);
-        if (rc != SQLITE_OK) { free(ids); return rc; }
         atomic_store(&sh->seg_min, ids[0].id);
     }
     if (nids > 0) {                                                   // the tail of the last segment may hold a torn record and what a crash left behind: clear it, so that stale records can never join the log again

@@ -612,6 +612,28 @@ void mw_log_stage_reset (mw_db *db, uint64_t off) {
     pthread_mutex_unlock(&db->log_mu);
 }
 
+// NORMAL/OFF still require the record to leave process-private memory
+// before acknowledgement. Another writer may be flushing an earlier prefix.
+static int stage_wait_written (mw_db *db, uint64_t epoch) {
+    pthread_mutex_lock(&db->log_mu);
+    while (db->flushed_epoch < epoch) {
+        if (atomic_load(&db->failed)) { pthread_mutex_unlock(&db->log_mu); return SQLITE_IOERR_WRITE; }
+        if (!db->sync_running && !db->stage_writing &&
+            (pipeline_on() || !db->stage_fsyncing) && db->written_end > db->flushed_off) {
+            pthread_mutex_unlock(&db->log_mu);
+            int rc = stage_flush(db, true);
+            if (rc != SQLITE_OK) return rc;
+            pthread_mutex_lock(&db->log_mu);
+        } else {
+            db->sync_waiters++;
+            pthread_cond_wait(&db->sync_cv, &db->log_mu);
+            db->sync_waiters--;
+        }
+    }
+    pthread_mutex_unlock(&db->log_mu);
+    return SQLITE_OK;
+}
+
 // Marks a finished record (epoch, ending at `end`) as copied: advances the contiguous prefix. log_mu held. Returns false on NOMEM.
 static bool mark_written (mw_db *db, uint64_t epoch, uint64_t end) {
     if (epoch == db->written_upto + 1) {
@@ -702,7 +724,7 @@ static int append_staged (mw_db *db, uint64_t off, uint64_t epoch, uint32_t dbsi
     if (!mark_written(db, epoch, end)) { pthread_mutex_unlock(&db->log_mu); return SQLITE_NOMEM; }
     if (db->written_end != before && db->sync_waiters > 0 && !db->sync_running && !db->stage_writing) pthread_cond_broadcast(&db->sync_cv);   // somebody may be able to write now
     pthread_mutex_unlock(&db->log_mu);
-    if (!sync) return stage_flush(db, true);                                    // no durability wait: the record still goes to the file promptly (a killed process keeps it)
+    if (!sync) return stage_wait_written(db, epoch);                            // no fsync, but our record must be in the file before returning
     return SQLITE_OK;
 }
 

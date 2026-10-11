@@ -100,6 +100,8 @@ static int mw_trace_cb (unsigned type, void *ctx, void *p, void *x) {
 static int mw_connection_init (sqlite3 *db, char **err, const sqlite3_api_routines *api) {
     (void)err; (void)api;
     const char *fn = sqlite3_db_filename(db, "main");
+    mw_lane *lane = NULL;
+    if (sqlite3_file_control(db, "main", MW_FCNTL_LANE_PTR, &lane) == SQLITE_OK && lane) lane->rd_db = db;
     sqlite3_trace_v2(db, SQLITE_TRACE_STMT | SQLITE_TRACE_PROFILE, mw_trace_cb, (fn && *fn && sqlite3_uri_boolean(fn, "mw_rebase", 0)) ? (void *)1 : NULL);
     return SQLITE_OK;
 }
