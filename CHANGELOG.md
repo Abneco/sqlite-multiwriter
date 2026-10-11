@@ -3,13 +3,25 @@
 All notable changes of sqlite-multiwriter are recorded here, newest first. The version is `MW_VERSION` in `src/multiwriter.h`; a version that is not released yet is pushed to `main` and released by the CI.
 The format of the files on disk (`-mwlock`, `-mwidx`, `-mw.N`, `-mw`) is the same in the versions listed here.
 
-## Unreleased
+## 0.6.3 - 2026-10-11
 
 ### Fixed
+- Rebase: a statement's own conflict policy (`INSERT` or `UPDATE` with `OR ...`, and the `ON CONFLICT` clause of an UPSERT) is not in the row images, and replaying it with the policy of the schema could delete or ignore a row that another writer had committed (a table with `UNIQUE ... ON CONFLICT REPLACE`, an `INSERT OR ABORT` or `ON CONFLICT DO NOTHING` that the other writer's row should have refused). A transaction with such a statement is refused (`SQLITE_BUSY`) instead of rebased.
+- Rebase: a column of type `ANY` in a `STRICT` table has no affinity: 1 and 1.0 are different values there, and the check of the old value compares the type too.
+- Rebase: decoding a negative integer no longer shifts a negative value (undefined behaviour in C).
+- `synchronous=NORMAL` and `OFF`: a commit returned while another writer was still writing an earlier part of the log, with its record in the memory of the process only; it returns when its record is in the file. Cost, measured with 16 connections on 8 threads (`mw_bench`, workload `independent`): about 25% fewer commits per second (206k -> 157k) and a median latency of 48 us against 35 us.
+- `PRAGMA synchronous`: the level that the engine takes follows SQLite (the names, the boolean words, hexadecimal and out-of-range values, the mask of the pager), and a PRAGMA that SQLite rejects inside a transaction does not change it. An attached database is bound to its connection when its b-tree opens, so this holds there too, with the trace hook of the engine replaced or not.
+- Processes mode: a record of the log that cannot be read when the segments are scanned leaves the end of the log unknown; the segments after it are no longer deleted, so that a later open can try again without losing data.
+- Row diff of the rebase: an allocation that fails (the map of pages, the chain of overflow pages, the copy of the freelist, the list of changes) refuses the transaction instead of going on with a null pointer.
 - A commit that an `fsync` already in flight covers is no longer refused when the log is failed meanwhile. The append of one commit failed with a later commit already behind it (the log is failed for good); a commit parked in the sync, whose record the running `fsync` was making durable, saw the failure first and was told that it had failed, and then the `fsync` finished and made it visible: it was refused and in the database (and in the log after a reopen). It now waits for the `fsync` that is running and is acknowledged if that one covers it; the ones that it does not cover are refused and stay invisible, as before. Found as a failure of `mw_rollbackrace` on a runner of two CPUs (2 of 150 runs on a machine of two, with and without the other changes); it is reproduced in every run by `mw_holesync`.
 
 ### Changed
 - Documentation: the wording of the isolation limits in the README and in the changelog says what is prevented (the classic write skew, by the validation of the reads) and where it is still possible, instead of "write skew is possible".
+- `test/sanitize.sh` runs every test and exits with the status of the first one that failed (it used to take the status of `tail`); the tests with a function replaced for a test (`-Dpwritev`, `-Dfsync`, `-Dmalloc`) are built there too, and `test/sanitize_exit.sh`, run by `make test` and `make test-ci`, checks the exit status.
+- Test `mw_procs` kills the process after it has acknowledged inserts, not after a fixed time (on a slow runner it was killed before its first insert).
+
+### Added
+- Tests `mw_strictany`, `mw_rebasepolicy`, `mw_rebaseneg`, `mw_syncpragma`, `mw_stagednormal`, `mw_recoverread`, `mw_rowdiffoom`, `mw_attachsync` and `mw_holesync`, each of them failing without the change that it is for.
 
 ## 0.6.2 - 2026-10-10
 
