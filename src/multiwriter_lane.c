@@ -173,7 +173,17 @@ static bool multirow_insert (const char *sql) {
     }
     return false;
 }
+static bool has_word (const char *sql, const char *w);
 static bool stmt_is_point (mw_lane *lane, sqlite3_stmt *st, const char *sql) {
+    // Row images do not retain a statement's OR policy, nor an UPSERT clause. Replaying it with
+    // the schema's policy could delete or ignore a concurrent writer's row.
+    const char *head = mw_sql_skip(sql);
+    if (sqlite3_strnicmp(head, "INSERT", 6) == 0 || sqlite3_strnicmp(head, "UPDATE", 6) == 0) {
+        const char *next = mw_sql_skip(head + 6);
+        if (sqlite3_strnicmp(next, "OR", 2) == 0 && !isalnum((unsigned char)next[2]) && next[2] != '_') return false;
+    }
+    // (ON CONFLICT ... DO NOTHING / DO UPDATE: a plain INSERT would take the schema's policy for the constraint instead; a match inside a string only makes a point statement look refused)
+    if (sqlite3_strnicmp(head, "INSERT", 6) == 0 && has_word(head, "CONFLICT")) return false;
     rd_ent *c = lane->rd_cache;
     if (!c) { c = lane->rd_cache = sqlite3_malloc64(RD_CACHE * sizeof *c); if (!c) return false; memset(c, 0, RD_CACHE * sizeof *c); }
     // The answer depends on the schema (the same text of an UPDATE ... WHERE email = ? is one row while a UNIQUE index exists and a scan of the table after it is dropped): it is kept for the
@@ -687,6 +697,9 @@ static int pragma_is (const char *name, const char *want) { return name && sqlit
 static int lm_file_control (sqlite3_file *pf, int op, void *arg) {
     mw_lane *lane = FILE_LANE(pf);
     tls_lane = lane;
+    // SQLite supplies the owning connection when each b-tree opens, including
+    // ATTACH. Capture it here so PRAGMA checks do not depend on trace hooks.
+    if (op == SQLITE_FCNTL_PDB) { lane->rd_db = *(sqlite3 **)arg; return SQLITE_OK; }
     if (op == MW_FCNTL_TXINFO) { *(mw_tx_info *)arg = lane->tx; return SQLITE_OK; }
     if (op == MW_FCNTL_WRITESET) {
         mw_writeset *ws = (mw_writeset *)arg;
@@ -719,12 +732,21 @@ static int lm_file_control (sqlite3_file *pf, int op, void *arg) {
             return SQLITE_ERROR;
         }
         if (pragma_is(name, "synchronous") && val) {          // observed, not handled: SQLite still executes it
-            int lv = (int)strtol(val, NULL, 10);
-            if (!strcmp(val, "0") || !sqlite3_stricmp(val, "off")) lv = 0;
-            else if (!sqlite3_stricmp(val, "normal")) lv = 1;
+            // SQLite rejects this PRAGMA even after a BEGIN that has not
+            // acquired a snapshot yet. Do not change the engine's level.
+            if (lane->rd_db && !sqlite3_get_autocommit(lane->rd_db)) return SQLITE_NOTFOUND;
+            // Match SQLite's getSafetyLevel and its pager mask, including
+            // boolean names, unknown names, and out-of-range integers.
+            int lv = 1;
+            if (val[0] >= '0' && val[0] <= '9') {
+                int base = val[0] == '0' && (val[1] == 'x' || val[1] == 'X') && isxdigit((unsigned char)val[2]) ? 16 : 10;
+                unsigned long n = strtoul(val, NULL, base);
+                lv = n > 2147483647UL ? 0 : (int)(n & 255);
+            } else if (!sqlite3_stricmp(val, "off") || !sqlite3_stricmp(val, "no") || !sqlite3_stricmp(val, "false")) lv = 0;
             else if (!sqlite3_stricmp(val, "full")) lv = 2;
             else if (!sqlite3_stricmp(val, "extra")) lv = 3;
-            lane->sync_level = lv;
+            lv = (lv + 1) & 7;
+            lane->sync_level = (lv ? lv : 1) - 1;
             return SQLITE_NOTFOUND;
         }
         if (pragma_is(name, "mmap_size") && val) { az[0] = sqlite3_mprintf("0"); return SQLITE_OK; }   // normalised to 0

@@ -83,9 +83,10 @@ static int freelist_of (mw_lane *lane, const uint8_t *const *imgs, bool new_stat
 
 // pgno -> root, for the children of the interior pages the transaction wrote (the owner of a page it allocated is the owner of the interior page that lists it)
 typedef struct { uint32_t *pg, *root; uint32_t cap, n; } ovmap;
-static void ov_put (ovmap *m, uint32_t pg, uint32_t root) {
+static bool ov_put (ovmap *m, uint32_t pg, uint32_t root) {
     if ((m->n + 1) * 2 > m->cap) {
         uint32_t nc = m->cap ? m->cap * 2 : 64; uint32_t *np = calloc(nc, sizeof *np), *nr = calloc(nc, sizeof *nr);
+        if (!np || !nr) { free(np); free(nr); return false; }
         for (uint32_t i = 0; i < m->cap; i++) if (m->pg[i]) { uint32_t h = (m->pg[i] * 2654435761u) & (nc - 1); while (np[h]) h = (h + 1) & (nc - 1); np[h] = m->pg[i]; nr[h] = m->root[i]; }
         free(m->pg); free(m->root); m->pg = np; m->root = nr; m->cap = nc;
     }
@@ -93,6 +94,7 @@ static void ov_put (ovmap *m, uint32_t pg, uint32_t root) {
     while (m->pg[h] && m->pg[h] != pg) h = (h + 1) & (m->cap - 1);
     if (!m->pg[h]) { m->pg[h] = pg; m->n++; }
     m->root[h] = root;
+    return true;
 }
 static uint32_t ov_get (const ovmap *m, uint32_t pg) {
     if (!m->cap) return 0;
@@ -143,7 +145,7 @@ static bool full_payload (mw_lane *lane, const uint8_t *const *imgs, bool new_st
         const uint8_t *pg = new_state ? ws_image(lane, imgs, ovfl) : NULL;
         if (!pg) { if (!mw_rd_snap_page(lane, ovfl, tmp)) { free(buf); free(tmp); return false; } pg = tmp; }
         size_t take = total - got < pgsz - 4 ? (size_t)(total - got) : pgsz - 4;
-        if (chain) { *chain = realloc(*chain, (size_t)(*nchain + 1) * sizeof **chain); (*chain)[(*nchain)++] = ovfl; }
+        if (chain) { uint32_t *next = realloc(*chain, (size_t)(*nchain + 1) * sizeof **chain); if (!next) { free(buf); free(tmp); return false; } *chain = next; (*chain)[(*nchain)++] = ovfl; }
         memcpy(buf + got, pg + 4, take); got += take; ovfl = be32(pg);
     }
     free(tmp);
@@ -182,7 +184,7 @@ static int s_build (mw_lane *lane, const mw_cat *cat, ovmap *S, uint8_t *tmp) {
     uint32_t pgsz = (uint32_t)lane->db->store->pgsz; long reads = 0;
     for (int t = 0; t < cat->n; t++) {
         const mw_tab *tab = &cat->tabs[t]; if (!tab->without_rowid || tab->root <= 1) continue;
-        ov_put(S, tab->root, tab->root);
+        if (!ov_put(S, tab->root, tab->root)) return -1;
         int depth = 0;
         for (uint32_t pg = tab->root; depth < 40; depth++) {                                                    // how many levels of interior pages: down the right edge
             if (++reads > 200000 || !mw_rd_snap_page(lane, pg, tmp)) return -1;
@@ -200,7 +202,7 @@ static int s_build (mw_lane *lane, const mw_cat *cat, ovmap *S, uint8_t *tmp) {
                 for (int c = -1; c < nc; c++) {
                     uint32_t ch;
                     if (c < 0) ch = be32(tmp + 8); else { uint32_t off = (uint32_t)be16(tmp + 12 + 2 * c); if (off + 4 > pgsz) { free(lvl); free(nxt); return -1; } ch = be32(tmp + off); }
-                    ov_put(S, ch, tab->root);
+                    if (!ov_put(S, ch, tab->root)) { free(lvl); free(nxt); return -1; }
                     if (d + 1 < depth) { if (nn == cn) { cn = cn ? cn * 2 : 64; uint32_t *np = realloc(nxt, cn * sizeof *np); if (!np) { free(lvl); free(nxt); return -1; } nxt = np; } nxt[nn++] = ch; }
                 }
             }
@@ -282,20 +284,20 @@ int mw_rowdiff_compute (mw_lane *lane, const uint8_t *const *imgs, const mw_cat 
         const uint8_t *p1new = ws_image(lane, imgs, 1);
         bool touched = p1new != NULL;
         for (int i = 0; i < lane->ws_n && !touched && nfo; i++) { uint32_t pg = lane->ws_pgnos[i]; if (bsearch(&pg, fo, (size_t)nfo, sizeof *fo, cmp_u32)) touched = true; }
-        if (!touched) { if (nfo) { fn = malloc((size_t)nfo * sizeof *fn); if (fn) { memcpy(fn, fo, (size_t)nfo * sizeof *fn); nfn = nfo; } } }
+        if (!touched) { if (nfo) { fn = malloc((size_t)nfo * sizeof *fn); if (fn) { memcpy(fn, fo, (size_t)nfo * sizeof *fn); nfn = nfo; } else why = "no memory"; } }
         else if (freelist_of(lane, imgs, true, p1new ? p1new : p1old, &fn, &nfn, &cfn, oldimg) < 0) why = "the freelist cannot be read"; else qsort(fn, (size_t)nfn, sizeof *fn, cmp_u32);
     }
     // owners of the pages of the committed state that the interior pages written by the commit list (a few passes: an interior page may itself be new)
     ovmap ov = {0};
     ovmap S = {0}, cm = {0};                                                          // WITHOUT ROWID: page -> root at the snapshot (built when first needed), and child -> parent for the interior pages that the transaction wrote
     bool s_ready = false;
-    if (!why && cat->has_wr) for (int i = 0; i < lane->ws_n; i++) {
+    if (!why && cat->has_wr) for (int i = 0; i < lane->ws_n && !why; i++) {
         const uint8_t *pg = imgs[i]; if (lane->ws_pgnos[i] == 1 || (pg[0] != 0x05 && pg[0] != 0x02)) continue;
         int nc = be16(pg + 3); uint32_t hdr = 12;
         for (int c = -1; c < nc; c++) {
             uint32_t ch;
             if (c < 0) ch = be32(pg + 8); else { uint32_t off = (uint32_t)be16(pg + hdr + 2 * c); if (off + 4 > pgsz) continue; ch = be32(pg + off); }
-            ov_put(&cm, ch, lane->ws_pgnos[i]);
+            if (!ov_put(&cm, ch, lane->ws_pgnos[i])) { why = "no memory"; break; }
         }
     }
     #define ENSURE_S() do { if (!why && cat->has_wr && !s_ready) { s_ready = true; if (s_build(lane, cat, &S, t1) < 0) why = "the pages of the WITHOUT ROWID tables cannot be listed"; } } while (0)
@@ -303,9 +305,9 @@ int mw_rowdiff_compute (mw_lane *lane, const uint8_t *const *imgs, const mw_cat 
     #define OLD_OWNER(pgno, out) do { (out) = 0; for (int _q = 0; _q < noc; _q++) if (oc[_q].pg == (pgno)) (out) = oc[_q].root; if (!(out) && !why) { (out) = old_owner(lane, cat, (pgno), t1, t2); if ((out) && noc < 64) oc[noc++] = (own_cache){ (pgno), (out) }; } } while (0)
     #define NEW_OWNER(pgno, out) do { (out) = 0; if (mw_cat_by_root(cat, (pgno))) (out) = (pgno); else { (out) = ov_get(&ov, (pgno)); if (!(out)) OLD_OWNER((pgno), (out)); } } while (0)
     if (!why) {
-        for (int pass = 0; pass < 3; pass++) {
+        for (int pass = 0; pass < 3 && !why; pass++) {
             int unresolved = 0; uint32_t before = ov.n;
-            for (int i = 0; i < lane->ws_n; i++) {
+            for (int i = 0; i < lane->ws_n && !why; i++) {
                 const uint8_t *pg = imgs[i]; if (lane->ws_pgnos[i] == 1 || pg[0] != 0x05) continue;
                 uint32_t r; NEW_OWNER(lane->ws_pgnos[i], r); if (!r) { unresolved++; continue; }
                 int nc = be16(pg + 3);
@@ -313,7 +315,7 @@ int mw_rowdiff_compute (mw_lane *lane, const uint8_t *const *imgs, const mw_cat 
                     uint32_t ch;
                     if (c < 0) ch = be32(pg + 8);
                     else { uint32_t off = (uint32_t)be16(pg + 12 + 2 * c); if (off + 4 > pgsz) continue; ch = be32(pg + off); }
-                    ov_put(&ov, ch, r);
+                    if (!ov_put(&ov, ch, r)) { why = "no memory"; break; }
                 }
             }
             if (!unresolved || ov.n == before) break;
@@ -399,7 +401,7 @@ int mw_rowdiff_compute (mw_lane *lane, const uint8_t *const *imgs, const mw_cat 
     // overflow pages written that no cell of the write set owns: an update that rewrites only the tail of a big value. Their owner is not known: unsupported.
     if (!why) {
         uint32_t *nch = NULL; int nnch = 0;
-        for (int k = 0; k < newr.n; k++) for (int q = 0; q < newr.a[k].nchain; q++) { nch = realloc(nch, (size_t)(nnch + 1) * sizeof *nch); nch[nnch++] = newr.a[k].chain[q]; }
+        for (int k = 0; k < newr.n && !why; k++) for (int q = 0; q < newr.a[k].nchain; q++) { uint32_t *next = realloc(nch, (size_t)(nnch + 1) * sizeof *nch); if (!next) { why = "no memory"; break; } nch = next; nch[nnch++] = newr.a[k].chain[q]; }
         qsort(nch, (size_t)nnch, sizeof *nch, cmp_u32);
         for (int i = 0; i < lane->ws_n && !why; i++) {
             uint32_t pg = lane->ws_pgnos[i];
@@ -432,6 +434,7 @@ int mw_rowdiff_compute (mw_lane *lane, const uint8_t *const *imgs, const mw_cat 
                 x->old_rec = dup_bytes(o->rec, o->reclen); x->old_len = o->reclen; x->new_rec = dup_bytes(w->rec, w->reclen); x->new_len = w->reclen; nout++;
             }
         }
+        if ((x->old_len && !x->old_rec) || (x->new_len && !x->new_rec)) { res->unsupported = "no memory"; break; }
     }
     res->chg = out; res->n = out ? nout : 0;
     rows_free(&oldr); rows_free(&newr);

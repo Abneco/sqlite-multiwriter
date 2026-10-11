@@ -63,15 +63,44 @@ $(BUILD)/t_%.o: test/%.c $(HEADERS) test/mw_test.h
 $(DIST)/mw_%$(EXE): $(BUILD)/t_mw_%.o $(LIB_OBJ)
 	@mkdir -p $(DIST)
 	$(CC) $^ -o $@ $(LDFLAGS)
+# Deterministic fault injection, confined to the translation unit under test.
+$(BUILD)/inject_log.o: $(SRC_DIR)/multiwriter_log.c $(HEADERS)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -Dpwritev=inject_pwritev -c $< -o $@
+$(BUILD)/inject_rowdiff.o: $(SRC_DIR)/multiwriter_rowdiff.c $(HEADERS)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -Dmalloc=inject_malloc -Dcalloc=inject_calloc -Drealloc=inject_realloc -c $< -o $@
+$(BUILD)/inject_fsync.o: $(SRC_DIR)/multiwriter_log.c $(HEADERS)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -Dfsync=inject_fsync -c $< -o $@
+$(DIST)/mw_holesync$(EXE): $(BUILD)/t_mw_holesync.o $(filter-out $(BUILD)/multiwriter_log.o,$(LIB_OBJ)) $(BUILD)/inject_fsync.o
+	@mkdir -p $(DIST)
+	$(CC) $^ -o $@ $(LDFLAGS)
+$(DIST)/mw_stagednormal$(EXE): $(BUILD)/t_mw_stagednormal.o $(filter-out $(BUILD)/multiwriter_log.o,$(LIB_OBJ)) $(BUILD)/inject_log.o
+	@mkdir -p $(DIST)
+	$(CC) $^ -o $@ $(LDFLAGS)
+$(DIST)/mw_rowdiffoom$(EXE): $(BUILD)/t_mw_rowdiffoom.o $(filter-out $(BUILD)/multiwriter_rowdiff.o,$(LIB_OBJ)) $(BUILD)/inject_rowdiff.o
+	@mkdir -p $(DIST)
+	$(CC) $^ -o $@ $(LDFLAGS)
+
 .PRECIOUS: $(BUILD)/t_%.o
 
-test: $(FAST_BIN)
+# the exit status of a failing test must survive the sanitizer runner (test/sanitize.sh); not for Windows, where the runner is not used
+.PHONY: test-sanitize-runner
+test-sanitize-runner:
+ifeq ($(PLATFORM),windows)
+	@echo "sanitizer runner regression skipped (Windows)"
+else
+	@if command -v bash >/dev/null 2>&1; then bash test/sanitize_exit.sh; else echo "sanitizer runner regression skipped (bash unavailable)"; fi
+endif
+
+test: $(FAST_BIN) test-sanitize-runner
 	@set -e; for t in $(FAST_BIN); do echo "== $$t"; ./$$t; done; echo "== mw_rebase (a WITHOUT ROWID table)"; MW_TEST_WR=1 ./$(DIST)/mw_rebase$(EXE)
 
 # the suite of the CI legs that run it on shared machines: without mw_serial (about a minute and a half of stress, which has a threshold of events that a loaded machine can miss); `make test` runs everything
 CI_BIN := $(filter-out $(DIST)/mw_serial$(EXE),$(FAST_BIN))
 .PHONY: test-ci
-test-ci: $(CI_BIN)
+test-ci: $(CI_BIN) test-sanitize-runner
 	@set -e; for t in $(CI_BIN); do echo "== $$t"; ./$$t; done; echo "== mw_rebase (a WITHOUT ROWID table)"; MW_TEST_WR=1 ./$(DIST)/mw_rebase$(EXE)
 
 # errors of the file system: a fault at every n-th file call of a workload, and a real full disk (a small disk image)
@@ -94,9 +123,9 @@ clean:
 	rm -rf $(BUILD) $(DIST)
 
 # the transaction tests with the shared multi-process mode (mw_mp=1) in place of the thread mode
-MP_TESTS := mw_rebase mw_rebasefk mw_rebasefkstress mw_rebasenoop mw_rebaseskew mw_rebasewr mw_serial mw_relocprep mw_shared
+MP_TESTS := mw_strictany mw_rebasepolicy mw_rebase mw_rebasefk mw_rebasefkstress mw_rebasenoop mw_rebaseskew mw_rebasewr mw_serial mw_relocprep mw_shared
 ifeq ($(PLATFORM),windows)
-MP_TESTS := mw_rebase mw_rebasefk mw_rebasefkstress mw_rebasenoop mw_rebaseskew mw_rebasewr mw_serial     # (the others fork)
+MP_TESTS := mw_strictany mw_rebasepolicy mw_rebase mw_rebasefk mw_rebasefkstress mw_rebasenoop mw_rebaseskew mw_rebasewr mw_serial     # (the others fork)
 endif
 .PHONY: test-mp
 test-mp: $(addsuffix $(EXE),$(addprefix $(DIST)/,$(MP_TESTS)))

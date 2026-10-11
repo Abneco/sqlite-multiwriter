@@ -99,7 +99,7 @@ static int bind_col (sqlite3_stmt *st, int idx, const rec_t *r, int col) {
     uint64_t t = r->ty[col]; const uint8_t *p = r->rec + r->off[col]; uint32_t l = r->len[col];
     if (t == 0) return sqlite3_bind_null(st, idx);
     if (t == 8 || t == 9) return sqlite3_bind_int64(st, idx, t == 9);
-    if (t >= 1 && t <= 6) { int64_t x = (int8_t)p[0]; for (uint32_t b = 1; b < l; b++) x = (x << 8) | p[b]; return sqlite3_bind_int64(st, idx, x); }
+    if (t >= 1 && t <= 6) { uint64_t x = (uint64_t)(int64_t)(int8_t)p[0]; for (uint32_t b = 1; b < l; b++) x = (x << 8) | p[b]; return sqlite3_bind_int64(st, idx, (int64_t)x); }
     if (t == 7) { uint64_t u = 0; for (int b = 0; b < 8; b++) u = (u << 8) | p[b]; double d; memcpy(&d, &u, 8); return sqlite3_bind_double(st, idx, d); }
     if (t >= 12 && (t & 1)) return sqlite3_bind_text(st, idx, l ? (const char *)p : "", (int)l, SQLITE_TRANSIENT);
     if (t >= 12) return sqlite3_bind_blob(st, idx, l ? (const void *)p : (const void *)"", (int)l, SQLITE_TRANSIENT);

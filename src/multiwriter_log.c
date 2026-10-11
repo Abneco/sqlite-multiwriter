@@ -612,6 +612,28 @@ void mw_log_stage_reset (mw_db *db, uint64_t off) {
     pthread_mutex_unlock(&db->log_mu);
 }
 
+// NORMAL/OFF still require the record to leave process-private memory
+// before acknowledgement. Another writer may be flushing an earlier prefix.
+static int stage_wait_written (mw_db *db, uint64_t epoch) {
+    pthread_mutex_lock(&db->log_mu);
+    while (db->flushed_epoch < epoch) {
+        if (atomic_load(&db->failed)) { pthread_mutex_unlock(&db->log_mu); return SQLITE_IOERR_WRITE; }
+        if (!db->sync_running && !db->stage_writing &&
+            (pipeline_on() || !db->stage_fsyncing) && db->written_end > db->flushed_off) {
+            pthread_mutex_unlock(&db->log_mu);
+            int rc = stage_flush(db, true);
+            if (rc != SQLITE_OK) return rc;
+            pthread_mutex_lock(&db->log_mu);
+        } else {
+            db->sync_waiters++;
+            pthread_cond_wait(&db->sync_cv, &db->log_mu);
+            db->sync_waiters--;
+        }
+    }
+    pthread_mutex_unlock(&db->log_mu);
+    return SQLITE_OK;
+}
+
 // Marks a finished record (epoch, ending at `end`) as copied: advances the contiguous prefix. log_mu held. Returns false on NOMEM.
 static bool mark_written (mw_db *db, uint64_t epoch, uint64_t end) {
     if (epoch == db->written_upto + 1) {
@@ -702,7 +724,7 @@ static int append_staged (mw_db *db, uint64_t off, uint64_t epoch, uint32_t dbsi
     if (!mark_written(db, epoch, end)) { pthread_mutex_unlock(&db->log_mu); return SQLITE_NOMEM; }
     if (db->written_end != before && db->sync_waiters > 0 && !db->sync_running && !db->stage_writing) pthread_cond_broadcast(&db->sync_cv);   // somebody may be able to write now
     pthread_mutex_unlock(&db->log_mu);
-    if (!sync) return stage_flush(db, true);                                    // no durability wait: the record still goes to the file promptly (a killed process keeps it)
+    if (!sync) return stage_wait_written(db, epoch);                            // no fsync, but our record must be in the file before returning
     return SQLITE_OK;
 }
 
@@ -717,7 +739,13 @@ static int sync_staged (mw_db *db, uint64_t my_epoch, uint64_t my_end) {
     // (done when the file is synced up to the record, or when everything up to its epoch is durable: a compaction that finds nothing in flight cuts the log back to its header and the
     // offsets restart, while a commit whose epoch the group leader has just made visible is still on its way out of this loop)
     while (db->synced_off < my_end && db->synced_upto < my_epoch) {
-        if (atomic_load(&db->failed)) { rc = SQLITE_IOERR_FSYNC; break; }
+        if (atomic_load(&db->failed)) {
+            // The log was failed (the append of an earlier commit did not make it, and a later one already has its place behind the hole). An fsync that is in flight covers what was written
+            // before it began, and its leader makes those commits durable and visible when it is done: a commit that it covers was not refused, and is not told that it was. What it does not
+            // cover is told, and stays invisible: no other fsync begins once the log is failed.
+            if (db->stage_fsyncing) { db->sync_waiters++; pthread_cond_wait(&db->sync_cv, &db->log_mu); db->sync_waiters--; continue; }
+            rc = SQLITE_IOERR_FSYNC; break;
+        }
         // Two roles, each held by one thread at a time, and (unless MW_NO_PIPELINE) working at the same time: the *writer* pwritev's the contiguous prefix of
         // finished records that is not in the file yet; the *syncer* fsyncs everything that was written before its fsync started. While one thread is in
         // fsync for group n another writes group n+1; group n+1 then needs its own fsync after the first one ends (an fsync covers only what was written before it began).

@@ -126,13 +126,14 @@ static void tab_parse (sqlite3 *scratch, const srow *r, mw_tab *t) {
     t->without_rowid = strcasestr(r->sql, "WITHOUT ROWID") != NULL;                                       // (the text: a default or a comment that says so fools it, and so does a second blank; below, SQLite says it)
     char *err = NULL;
     if (sqlite3_exec(scratch, r->sql, NULL, NULL, &err) != SQLITE_OK) { sqlite3_free(err); return; }
-    {   // SQLite 3.37 and later: PRAGMA table_list has a column wr
+    bool strict = false;
+    {   // SQLite 3.37 and later: PRAGMA table_list has columns wr and strict
         char *wq = sqlite3_mprintf("PRAGMA table_list(\"%w\")", r->name); sqlite3_stmt *ws = NULL;
         if (wq && sqlite3_prepare_v2(scratch, wq, -1, &ws, NULL) == SQLITE_OK) {
-            int wrcol = -1; for (int i = 0; i < sqlite3_column_count(ws); i++) if (!strcmp(sqlite3_column_name(ws, i), "wr")) wrcol = i;
+            int wrcol = -1, strictcol = -1; for (int i = 0; i < sqlite3_column_count(ws); i++) { if (!strcmp(sqlite3_column_name(ws, i), "wr")) wrcol = i; if (!strcmp(sqlite3_column_name(ws, i), "strict")) strictcol = i; }
             if (wrcol >= 0) while (sqlite3_step(ws) == SQLITE_ROW) {
                 const char *nm = (const char *)sqlite3_column_text(ws, 1);
-                if (nm && !strcasecmp(nm, r->name)) { t->without_rowid = sqlite3_column_int(ws, wrcol) != 0; break; }
+                if (nm && !strcasecmp(nm, r->name)) { t->without_rowid = sqlite3_column_int(ws, wrcol) != 0; strict = strictcol >= 0 && sqlite3_column_int(ws, strictcol) != 0; break; }
             }
         }
         sqlite3_finalize(ws); sqlite3_free(wq);
@@ -182,7 +183,7 @@ static void tab_parse (sqlite3 *scratch, const srow *r, mw_tab *t) {
         int i = order[j];
         if (cols[i].hidden == 2) continue;                                                                   // (generated, virtual: not stored)
         if (t->alias_pk && cols[i].pk == 1) t->alias_rec = pos;
-        if (t->noaff) t->noaff[pos] = type_has_no_affinity(cols[i].type);
+        if (t->noaff) t->noaff[pos] = type_has_no_affinity(cols[i].type) || (strict && !strcasecmp(cols[i].type, "ANY"));
         t->rec_name[pos++] = (cols[i].hidden == 3) ? NULL : strdup(cols[i].name);                            // (generated, stored: in the record, derived)
     }
     t->nrec = pos;
