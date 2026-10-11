@@ -18,7 +18,7 @@ for f in src/*.c; do cc -w $CF -c $f -o $OUT/$(basename $f .c).o; done
 cc -w -O1 -g $SAN -fno-omit-frame-pointer -Ithird_party/sqlite -DSQLITE_EXTRA_INIT=mw_extra_init -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE -DSQLITE_CORE -c third_party/sqlite/sqlite3.c -o $OUT/sqlite3.o
 LIBS=$(ls $OUT/*.o | grep -v "/t_")
 EXTRA=""; [ "$(uname)" = Darwin ] && EXTRA="-framework Security"
-TESTS=${@:-"mw_serial mw_relocprep mw_reloc mw_lanes mw_rebaseneg"}
+TESTS=${@:-"mw_serial mw_relocprep mw_reloc mw_lanes mw_rebaseneg mw_attachsync"}
 status=0
 for t in $TESTS; do
   b=$(basename $t)

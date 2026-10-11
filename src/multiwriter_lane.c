@@ -697,6 +697,9 @@ static int pragma_is (const char *name, const char *want) { return name && sqlit
 static int lm_file_control (sqlite3_file *pf, int op, void *arg) {
     mw_lane *lane = FILE_LANE(pf);
     tls_lane = lane;
+    // SQLite supplies the owning connection when each b-tree opens, including
+    // ATTACH. Capture it here so PRAGMA checks do not depend on trace hooks.
+    if (op == SQLITE_FCNTL_PDB) { lane->rd_db = *(sqlite3 **)arg; return SQLITE_OK; }
     if (op == MW_FCNTL_TXINFO) { *(mw_tx_info *)arg = lane->tx; return SQLITE_OK; }
     if (op == MW_FCNTL_WRITESET) {
         mw_writeset *ws = (mw_writeset *)arg;
