@@ -75,6 +75,22 @@ static void pause_ms (int ms) {
 #endif
 }
 
+// Waits until the process `id` has acknowledged `n` inserts (its file of acknowledgements has a byte for each), for at most `limit_ms`: the victim of a kill must be in the middle of its inserts, and
+// how long a process takes to start and to get going is not the same on every machine (a sleep of a fixed time killed one of them before its first insert on a slow runner). The size is read from an
+// open handle: on Windows the size that stat() gives for a file that another process holds open lags behind. Returns the number of acknowledgements seen.
+static long long wait_acked (const char *path, int id, long long n, int limit_ms) {
+    char ackp[700]; snprintf(ackp, sizeof ackp, "%s.ack%d", path, id);
+    long long seen = 0;
+    for (int waited = 0; waited <= limit_ms; waited += 5) {
+        int fd = open(ackp, O_RDONLY | O_BINARY);
+        if (fd >= 0) { long sz = (long)lseek(fd, 0, SEEK_END); close(fd); if (sz > 0) seen = sz; }
+        if (seen >= n) return seen;
+        pause_ms(5);
+    }
+    fprintf(stderr, "mw_procs: process %d had %lld acknowledged inserts after %d ms (wanted %lld)\n", id, seen, limit_ms, n);
+    return seen;
+}
+
 static int integrity_ok (sqlite3 *db) {
     sqlite3_stmt *st; int ok = 0;
     if (sqlite3_prepare_v2(db, "PRAGMA integrity_check", -1, &st, NULL) == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW) ok = strcmp((const char *)sqlite3_column_text(st, 0), "ok") == 0;
@@ -114,7 +130,7 @@ int main (int argc, char **argv) {
 
         // 2. one is killed in the middle of its inserts: the others finish, nothing is torn, and a new process can write
         for (int i = 0; i < KIDS; i++) { p[i] = spawn(self, path, 10 + i, i == 1 ? 1000000 : ROWS * 4, rebase); CHECK(p[i] != 0 && p[i] != (proc_t)-1); }
-        pause_ms(400); kill_it(p[1]); wait_for(p[1]);
+        wait_acked(path, 11, 200, 60000); kill_it(p[1]); wait_for(p[1]);                                      // (killed after it has inserted: not after a fixed time)
         bad = 0; for (int i = 0; i < KIDS; i++) if (i != 1) bad += wait_for(p[i]) != 0;
         CHECK(bad == 0);
         proc_t again = spawn(self, path, 20, 50, rebase); CHECK(wait_for(again) == 0);
@@ -131,7 +147,7 @@ int main (int argc, char **argv) {
         // 3. all of them are killed in the middle of their inserts, and the database is opened at once: what each had acknowledged is there
         for (int k = 0; k < 40; k++) { char ap[700]; snprintf(ap, sizeof ap, "%s.ack%d", path, k); unlink(ap); }
         for (int i = 0; i < KIDS; i++) { p[i] = spawn(self, path, 30 + i, 1000000, rebase); CHECK(p[i] != 0 && p[i] != (proc_t)-1); }
-        pause_ms(600);
+        for (int i = 0; i < KIDS; i++) wait_acked(path, 30 + i, 100, 60000);                       // (each one is in the middle of its inserts)
         for (int i = 0; i < KIDS; i++) { kill_it(p[i]); wait_for(p[i]); }
         { const char *tf = getenv("MW_OS_TRACE"); FILE *f = tf && tf[0] != '1' ? fopen(tf, "a") : NULL; if (f) { fprintf(f, "MARK all killed, the database is opened now\n"); fclose(f); } }
         CHECK_RC(sqlite3_open_v2(uri, &c, SQLITE_OPEN_READWRITE | SQLITE_OPEN_URI, NULL), SQLITE_OK);
