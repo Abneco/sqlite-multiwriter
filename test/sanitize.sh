@@ -28,6 +28,9 @@ for t in $TESTS; do
     mw_stagednormal)
       cc -w $CF -Dpwritev=inject_pwritev -c src/multiwriter_log.c -o $OUT/injected.o
       TEST_LIBS="${LIBS//$OUT\/multiwriter_log.o/} $OUT/injected.o";;
+    mw_holesync)
+      cc -w $CF -Dfsync=inject_fsync -c src/multiwriter_log.c -o $OUT/injected.o
+      TEST_LIBS="${LIBS//$OUT\/multiwriter_log.o/} $OUT/injected.o";;
     mw_rowdiffoom)
       cc -w $CF -Dmalloc=inject_malloc -Dcalloc=inject_calloc -Drealloc=inject_realloc -c src/multiwriter_rowdiff.c -o $OUT/injected.o
       TEST_LIBS="${LIBS//$OUT\/multiwriter_rowdiff.o/} $OUT/injected.o";;

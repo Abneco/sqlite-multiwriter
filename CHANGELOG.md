@@ -5,6 +5,9 @@ The format of the files on disk (`-mwlock`, `-mwidx`, `-mw.N`, `-mw`) is the sam
 
 ## Unreleased
 
+### Fixed
+- A commit that an `fsync` already in flight covers is no longer refused when the log is failed meanwhile. The append of one commit failed with a later commit already behind it (the log is failed for good); a commit parked in the sync, whose record the running `fsync` was making durable, saw the failure first and was told that it had failed, and then the `fsync` finished and made it visible: it was refused and in the database (and in the log after a reopen). It now waits for the `fsync` that is running and is acknowledged if that one covers it; the ones that it does not cover are refused and stay invisible, as before. Found as a failure of `mw_rollbackrace` on a runner of two CPUs (2 of 150 runs on a machine of two, with and without the other changes); it is reproduced in every run by `mw_holesync`.
+
 ### Changed
 - Documentation: the wording of the isolation limits in the README and in the changelog says what is prevented (the classic write skew, by the validation of the reads) and where it is still possible, instead of "write skew is possible".
 
